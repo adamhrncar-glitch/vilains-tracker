@@ -398,8 +398,11 @@
             
             renderLimits();
             renderTable();
-            updateStats();
+
+            // OPRAVA: Inicializace grafů MUSÍ být před updateStats, jinak jsou proměnné grafů null
             initCharts();
+            updateStats();
+            
             document.getElementById('pdfDate').textContent = new Date().toLocaleDateString('cs-CZ');
         }
 
