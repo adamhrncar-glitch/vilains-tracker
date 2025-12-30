@@ -1,376 +1,376 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc, query } from 'firebase/firestore';
-import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Legend } from 'recharts';
-import { Users, CheckCircle, XCircle, TrendingUp, Search, Plus, Trash2, Info } from 'lucide-react';
-
-// Firebase initialization
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'villains-workshop-default';
-
-const WORKSHOP_LIMITS = {
-  500: 20, 450: 19, 400: 18, 350: 17, 325: 16, 300: 15, 
-  275: 14, 250: 13, 230: 12, 210: 11, 190: 10, 170: 9, 
-  150: 8, 101: 7
-};
-
-export default function App() {
-  const [user, setUser] = useState(null);
-  const [members, setMembers] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [newMember, setNewMember] = useState({ name: '', level: '', workshop: '' });
-  const [loading, setLoading] = useState(true);
-
-  // 1. Strict Authentication Flow (Rule 3)
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth error:", error);
-      }
-    };
-    initAuth();
-    
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      if (!currentUser) setLoading(true);
-    });
-    
-    return () => unsubscribe();
-  }, []);
-
-  // 2. Data Fetching (Guarded by user state)
-  useEffect(() => {
-    if (!user) return;
-
-    // Use the mandatory path structure (Rule 1)
-    const membersCollection = collection(db, 'artifacts', appId, 'public', 'data', 'members');
-    
-    const unsubscribe = onSnapshot(
-      membersCollection, 
-      (snapshot) => {
-        const memberList = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        setMembers(memberList);
-        setLoading(false);
-      }, 
-      (error) => {
-        console.error("Firestore permission or fetch error:", error);
-        // If we get a permission error, it might be a race condition, we keep loading state
-      }
-    );
-
-    return () => unsubscribe();
-  }, [user]);
-
-  const getRequirement = (level) => {
-    const sortedLimits = Object.entries(WORKSHOP_LIMITS).sort((a, b) => b[0] - a[0]);
-    for (const [limit, req] of sortedLimits) {
-      if (level >= parseInt(limit)) return req;
-    }
-    return 0;
-  };
-
-  const processedMembers = useMemo(() => {
-    return members
-      .filter(m => m.name?.toLowerCase().includes(searchTerm.toLowerCase()))
-      .sort((a, b) => (b.level || 0) - (a.level || 0));
-  }, [members, searchTerm]);
-
-  const stats = useMemo(() => {
-    const total = members.length;
-    const completed = members.filter(m => m.workshop >= getRequirement(m.level)).length;
-    const failed = total - completed;
-    const percent = total ? Math.round((completed / total) * 100) : 0;
-    return { total, completed, failed, percent };
-  }, [members]);
-
-  const handleAddMember = async () => {
-    if (!user || !newMember.name || !newMember.level) return;
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'members'), {
-        name: newMember.name,
-        level: parseInt(newMember.level),
-        workshop: parseInt(newMember.workshop) || 0,
-        createdAt: Date.now(),
-        createdBy: user.uid
-      });
-      setNewMember({ name: '', level: '', workshop: '' });
-      setIsModalOpen(false);
-    } catch (e) {
-      console.error("Add error:", e);
-    }
-  };
-
-  const handleUpdate = async (id, field, value) => {
-    if (!user) return;
-    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', id);
-    const updateData = {};
-    updateData[field] = (field === 'name') ? value : (parseInt(value) || 0);
-    try {
-      await updateDoc(docRef, updateData);
-    } catch (e) {
-      console.error("Update error:", e);
-    }
-  };
-
-  const handleDelete = async (id) => {
-    if (!user) return;
-    if (window.confirm("Opravdu smazat tohoto člena?")) {
-      try {
-        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', id));
-      } catch (e) {
-        console.error("Delete error:", e);
-      }
-    }
-  };
-
-  const chartData = [
-    { name: 'Splněno', value: stats.completed, color: '#10b981' },
-    { name: 'Nesplněno', value: stats.failed, color: '#ef4444' }
-  ];
-
-  if (loading) return (
-    <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white p-4">
-      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-red-600 mb-4"></div>
-      <p className="text-gray-500 animate-pulse uppercase tracking-widest text-xs font-bold">Přihlašování do cloudu...</p>
-    </div>
-  );
-
-  return (
-    <div className="min-h-screen bg-[#050505] text-gray-200 font-sans p-4 md:p-8">
-      <div className="fixed inset-0 pointer-events-none opacity-20">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-red-900 rounded-full blur-[120px]"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900 rounded-full blur-[120px]"></div>
-      </div>
-
-      <div className="max-w-7xl mx-auto relative z-10">
-        <header className="text-center mb-12">
-          <h1 className="text-5xl md:text-7xl font-black uppercase tracking-tighter text-white mb-2">
-            <span className="text-red-600">⚜</span> Villains <span className="text-red-600">⚜</span>
-          </h1>
-          <p className="text-red-500 font-bold tracking-[0.3em] text-sm uppercase">Cloud Workshop Tracker</p>
-          <div className="mt-4 flex justify-center items-center gap-2">
-             <span className="text-[10px] text-gray-600 font-mono">ID: {user?.uid.substring(0, 8)}...</span>
-            <span className="flex items-center gap-1 text-xs bg-white/5 px-3 py-1 rounded-full border border-white/10 text-gray-400">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Online
-            </span>
-          </div>
-        </header>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          {[
-            { label: 'Členů', val: stats.total, icon: Users, color: 'text-white' },
-            { label: 'Splněno', val: stats.completed, icon: CheckCircle, color: 'text-emerald-500' },
-            { label: 'Nesplněno', val: stats.failed, icon: XCircle, color: 'text-red-500' },
-            { label: 'Úspěšnost', val: `${stats.percent}%`, icon: TrendingUp, color: 'text-blue-500' }
-          ].map((s, i) => (
-            <div key={i} className="bg-white/5 backdrop-blur-md border border-white/10 p-4 md:p-6 rounded-2xl">
-              <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">{s.label}</p>
-              <p className={`text-2xl md:text-4xl font-black mt-1 ${s.color}`}>{s.val}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="grid md:grid-cols-2 gap-6 mb-8">
-          <div className="bg-white/5 border border-white/10 p-6 rounded-2xl h-[300px]">
-            <h3 className="text-xs font-bold text-gray-500 uppercase mb-4 text-center">Poměr splnění limitů</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={chartData} innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
-                  {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
-                </Pie>
-                <Tooltip contentStyle={{ backgroundColor: '#111', border: 'none', borderRadius: '8px' }} />
-                <Legend verticalAlign="bottom" height={36}/>
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="bg-white/5 border border-white/10 p-6 rounded-2xl h-[300px]">
-            <h3 className="text-xs font-bold text-gray-500 uppercase mb-4 text-center">Levely vs Dílny</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={processedMembers}>
-                <XAxis dataKey="name" hide />
-                <YAxis stroke="#444" fontSize={10} />
-                <Tooltip cursor={{fill: 'rgba(255,255,255,0.05)'}} contentStyle={{ backgroundColor: '#111', border: 'none' }} />
-                <Bar name="Level" dataKey="level" fill="#dc2626" radius={[2, 2, 0, 0]} />
-                <Bar name="Dílna" dataKey="workshop" fill="#10b981" radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="flex flex-col md:flex-row gap-4 mb-6">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-            <input 
-              type="text" 
-              placeholder="Hledat hráče..."
-              className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-4 focus:ring-1 ring-red-600 outline-none transition-all"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-          <button 
-            onClick={() => setIsModalOpen(true)}
-            className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-xl flex items-center justify-center gap-2 transition-all"
-          >
-            <Plus className="w-5 h-5" /> Přidat Člena
-          </button>
-        </div>
-
-        <div className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden mb-12">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[600px]">
-              <thead>
-                <tr className="bg-white/5 text-[10px] uppercase tracking-widest text-gray-500">
-                  <th className="px-6 py-4 font-bold">Nick</th>
-                  <th className="px-6 py-4 font-bold text-center">Level</th>
-                  <th className="px-6 py-4 font-bold text-center">Dílna</th>
-                  <th className="px-6 py-4 font-bold text-center">Potřeba</th>
-                  <th className="px-6 py-4 font-bold text-center">Stav</th>
-                  <th className="px-6 py-4 font-bold text-right">Akce</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {processedMembers.map((m) => {
-                  const req = getRequirement(m.level);
-                  const isMet = m.workshop >= req;
-                  return (
-                    <tr key={m.id} className="hover:bg-white/[0.02] transition-colors group">
-                      <td className="px-6 py-4">
-                        <input 
-                          className="bg-transparent border-none focus:ring-0 w-full font-bold text-white p-0"
-                          value={m.name}
-                          onChange={(e) => handleUpdate(m.id, 'name', e.target.value)}
-                        />
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <input 
-                          type="number"
-                          className="bg-transparent border-none focus:ring-0 w-16 text-center font-mono p-0"
-                          value={m.level}
-                          onChange={(e) => handleUpdate(m.id, 'level', e.target.value)}
-                        />
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <div className="inline-flex items-center gap-3">
-                           <button onClick={() => handleUpdate(m.id, 'workshop', m.workshop - 1)} className="text-gray-500 hover:text-white transition-colors w-6 h-6 flex items-center justify-center bg-white/5 rounded">-</button>
-                           <input 
-                            type="number"
-                            className="bg-white/5 border border-white/10 rounded-lg w-12 text-center py-1 font-bold text-sm"
-                            value={m.workshop}
-                            onChange={(e) => handleUpdate(m.id, 'workshop', e.target.value)}
-                          />
-                          <button onClick={() => handleUpdate(m.id, 'workshop', m.workshop + 1)} className="text-gray-500 hover:text-white transition-colors w-6 h-6 flex items-center justify-center bg-white/5 rounded">+</button>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-center text-gray-500 text-xs">
-                        min. {req}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${isMet ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' : 'bg-red-500/10 text-red-500 border border-red-500/20'}`}>
-                          {isMet ? 'OK' : 'Fail'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button onClick={() => handleDelete(m.id)} className="text-gray-600 hover:text-red-500 transition-colors p-2">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {processedMembers.length === 0 && (
-            <div className="py-20 text-center text-gray-600 uppercase tracking-widest text-[10px] font-bold">
-              Žádní členové v databázi
-            </div>
-          )}
-        </div>
-
-        <div className="mb-20">
-          <h2 className="text-xl font-black uppercase text-red-600 mb-6 flex items-center gap-2">
-            <Info className="w-5 h-5" /> Aktuální Limity Dílen
-          </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-3">
-            {Object.entries(WORKSHOP_LIMITS).sort((a,b) => b[0]-a[0]).map(([lvl, ws]) => (
-              <div key={lvl} className="bg-white/5 border border-white/10 p-3 rounded-xl text-center">
-                <p className="text-[10px] text-gray-500 uppercase font-bold">Lvl {lvl}+</p>
-                <p className="text-xl font-black text-white">{ws}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="bg-[#111] border border-white/10 w-full max-w-md rounded-2xl p-8 shadow-2xl">
-            <h2 className="text-2xl font-black text-white uppercase mb-6">Nový Hráč</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Jméno / Nick</label>
-                <input 
-                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:ring-1 ring-red-600"
-                  placeholder="Nick ve hře"
-                  value={newMember.name}
-                  onChange={(e) => setNewMember({...newMember, name: e.target.value})}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Level</label>
-                  <input 
-                    type="number"
-                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:ring-1 ring-red-600"
-                    placeholder="1-600"
-                    value={newMember.level}
-                    onChange={(e) => setNewMember({...newMember, level: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Dílna</label>
-                  <input 
-                    type="number"
-                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:ring-1 ring-red-600"
-                    placeholder="0-20"
-                    value={newMember.workshop}
-                    onChange={(e) => setNewMember({...newMember, workshop: e.target.value})}
-                  />
-                </div>
-              </div>
-              <div className="flex gap-3 mt-8">
-                <button 
-                  onClick={() => setIsModalOpen(false)}
-                  className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-3 rounded-xl transition-all"
-                >
-                  Zrušit
-                </button>
-                <button 
-                  onClick={handleAddMember}
-                  className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all"
-                >
-                  Uložit
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<title>Statistiky hráčů</title>
+<style>
+/* PDF export styling */
+.pdf-wrapper {
+    padding: 20px;
+    font-family: Arial, sans-serif;
 }
+.pdf-title {
+    font-size: 24px;
+    font-weight: bold;
+    margin-bottom: 20px;
+    text-align: center;
+}
+/* Table styling */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+table, th, td {
+    border: 1px solid #ddd;
+}
+th, td {
+    padding: 8px;
+    text-align: left;
+}
+th {
+    background-color: #f4f4f4;
+}
+tr:nth-child(even) {
+    background-color: #fbfbfb;
+}
+/* Controls */
+.controls {
+    margin: 20px 0;
+    text-align: center;
+}
+.controls input {
+    padding: 8px;
+    width: 200px;
+    margin-right: 10px;
+}
+.controls button {
+    padding: 8px 12px;
+    margin: 5px;
+}
+/* Stats */
+#stats {
+    margin-bottom: 20px;
+}
+#stats p {
+    margin: 5px 0;
+}
+/* Chart canvas */
+#chart {
+    max-width: 100%;
+    height: 300px;
+}
+/* Toast notification */
+#toast {
+    visibility: hidden;
+    min-width: 200px;
+    background-color: #333;
+    color: #fff;
+    text-align: center;
+    border-radius: 4px;
+    padding: 10px;
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.5s, visibility 0.5s;
+}
+#toast.show {
+    visibility: visible;
+    opacity: 0.9;
+}
+/* Modal window */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgba(0,0,0,0.5);
+}
+.modal-content {
+    background-color: #fefefe;
+    margin: 100px auto;
+    padding: 20px;
+    border: 1px solid #888;
+    width: 80%;
+    max-width: 400px;
+    border-radius: 4px;
+}
+.modal-content h2 {
+    margin-top: 0;
+}
+.modal-content label {
+    display: block;
+    margin: 10px 0;
+}
+.modal-content input {
+    width: 100%;
+    padding: 6px;
+    box-sizing: border-box;
+}
+.modal-content button {
+    padding: 8px 12px;
+    margin: 10px 5px 0 0;
+}
+/* Responsive */
+@media (max-width: 600px) {
+    .controls input {
+        width: 100%;
+        margin-bottom: 10px;
+    }
+    .controls button {
+        width: 100%;
+        margin: 5px 0;
+    }
+    .modal-content {
+        width: 90%;
+        margin: 50px auto;
+    }
+}
+</style>
+<!-- Include Chart.js and html2pdf from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</head>
+<body>
+<div class="controls">
+    <input type="text" id="filterInput" placeholder="Filtrovat hráče...">
+    <button id="addPlayerBtn">Přidat hráče</button>
+    <button id="exportCsvBtn">Export CSV</button>
+    <button id="exportPdfBtn">Export PDF</button>
+</div>
+<div class="pdf-wrapper">
+    <h1 class="pdf-title">Statistiky hráčů</h1>
+    <table id="players-table">
+        <thead>
+            <tr><th>Jméno</th><th>Skóre</th><th>Akce</th></tr>
+        </thead>
+        <tbody id="players-table-body">
+        <!-- Dynamicky generované řádky -->
+        </tbody>
+    </table>
+    <div id="stats">
+        <p>Počet hráčů: <span id="stat-count"></span></p>
+        <p>Průměrné skóre: <span id="stat-average"></span></p>
+    </div>
+    <canvas id="chart"></canvas>
+</div>
+<div id="toast"></div>
+<!-- Modal pro přidání hráče -->
+<div id="modal" class="modal">
+  <div class="modal-content">
+    <h2>Přidat hráče</h2>
+    <label>Jméno: <input type="text" id="newName"></label>
+    <label>Skóre: <input type="number" id="newScore"></label>
+    <button id="savePlayerBtn">Uložit</button>
+    <button id="closeModalBtn">Zavřít</button>
+  </div>
+</div>
+<script>
+// Data structure
+let players = [];
+
+// Initialize from localStorage or default
+function loadData() {
+    const data = localStorage.getItem('playersData');
+    if (data) {
+        players = JSON.parse(data);
+    } else {
+        // Default sample players
+        players = [
+            {name: 'Alice', score: 10},
+            {name: 'Bob', score: 15},
+            {name: 'Charlie', score: 7}
+        ];
+    }
+}
+
+// Save to localStorage
+function saveData() {
+    localStorage.setItem('playersData', JSON.stringify(players));
+    showToast('Data byla uložena');
+}
+
+// Debounce mechanism
+let saveTimeout;
+function scheduleSave() {
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(saveData, 500);
+}
+
+// Render table rows
+function renderTable() {
+    const tbody = document.getElementById('players-table-body');
+    tbody.innerHTML = '';
+    players.forEach((p, index) => {
+        const tr = document.createElement('tr');
+        // Name cell with input
+        const tdName = document.createElement('td');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.value = p.name;
+        nameInput.dataset.index = index;
+        nameInput.classList.add('name-input');
+        nameInput.addEventListener('input', onInputChange);
+        tdName.appendChild(nameInput);
+        tr.appendChild(tdName);
+        // Score cell with input
+        const tdScore = document.createElement('td');
+        const scoreInput = document.createElement('input');
+        scoreInput.type = 'number';
+        scoreInput.value = p.score;
+        scoreInput.min = 0;
+        scoreInput.dataset.index = index;
+        scoreInput.classList.add('score-input');
+        scoreInput.addEventListener('input', onInputChange);
+        tdScore.appendChild(scoreInput);
+        tr.appendChild(tdScore);
+        // Action cell with delete button
+        const tdAction = document.createElement('td');
+        const delBtn = document.createElement('button');
+        delBtn.textContent = 'Smazat';
+        delBtn.addEventListener('click', () => {
+            removePlayer(index);
+        });
+        tdAction.appendChild(delBtn);
+        tr.appendChild(tdAction);
+        tbody.appendChild(tr);
+    });
+    updateStats();
+    updateChart();
+}
+
+// Update stats display
+function updateStats() {
+    const count = players.length;
+    const average = count ? (players.reduce((sum,p) => sum + (p.score ? parseFloat(p.score) : 0), 0) / count).toFixed(2) : 0;
+    document.getElementById('stat-count').textContent = count;
+    document.getElementById('stat-average').textContent = average;
+}
+
+// Chart.js chart
+let chart;
+function updateChart() {
+    const ctx = document.getElementById('chart').getContext('2d');
+    const labels = players.map(p => p.name);
+    const data = players.map(p => Number(p.score));
+    if (chart) {
+        chart.data.labels = labels;
+        chart.data.datasets[0].data = data;
+        chart.update();
+    } else {
+        chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Skóre hráčů',
+                    data: data,
+                    backgroundColor: 'rgba(54, 162, 235, 0.6)'
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+    }
+}
+
+// Input change handler
+function onInputChange(e) {
+    const index = e.target.dataset.index;
+    if (e.target.classList.contains('name-input')) {
+        players[index].name = e.target.value;
+    } else if (e.target.classList.contains('score-input')) {
+        players[index].score = e.target.value;
+    }
+    updateChart();
+    updateStats();
+    scheduleSave();
+}
+
+// Remove a player
+function removePlayer(index) {
+    players.splice(index, 1);
+    renderTable();
+    saveData();
+    showToast('Hráč odstraněn');
+}
+
+// Filter players
+document.getElementById('filterInput').addEventListener('input', function() {
+    const filter = this.value.toLowerCase();
+    document.querySelectorAll('#players-table-body tr').forEach(row => {
+        const name = row.querySelector('.name-input').value.toLowerCase();
+        row.style.display = name.includes(filter) ? '' : 'none';
+    });
+});
+
+// Add player modal
+document.getElementById('addPlayerBtn').addEventListener('click', () => {
+    document.getElementById('modal').style.display = 'block';
+});
+document.getElementById('closeModalBtn').addEventListener('click', () => {
+    document.getElementById('modal').style.display = 'none';
+});
+document.getElementById('savePlayerBtn').addEventListener('click', () => {
+    const name = document.getElementById('newName').value.trim();
+    const score = document.getElementById('newScore').value;
+    if (name) {
+        players.push({name: name, score: score || 0});
+        renderTable();
+        saveData();
+        showToast('Hráč přidán');
+        document.getElementById('modal').style.display = 'none';
+        document.getElementById('newName').value = '';
+        document.getElementById('newScore').value = '';
+    }
+});
+
+// Export CSV
+document.getElementById('exportCsvBtn').addEventListener('click', () => {
+    let csvContent = 'Jméno,Skóre\n';
+    players.forEach(p => {
+        csvContent += p.name + ',' + p.score + '\n';
+    });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'players.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    showToast('CSV bylo exportováno');
+});
+
+// Export PDF
+document.getElementById('exportPdfBtn').addEventListener('click', () => {
+    const element = document.querySelector('.pdf-wrapper');
+    html2pdf().from(element).save();
+    showToast('PDF bylo exportováno');
+});
+
+// Toast function
+function showToast(message) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.className = 'show';
+    setTimeout(() => { toast.className = toast.className.replace('show', ''); }, 3000);
+}
+
+// Init
+loadData();
+renderTable();
+
+</script>
+</body>
+</html>
