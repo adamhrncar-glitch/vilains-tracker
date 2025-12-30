@@ -1,889 +1,376 @@
-<!DOCTYPE html>
-<html lang="cs">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Villains - Workshop Tracker 3.0</title>
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc, query } from 'firebase/firestore';
+import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Legend } from 'recharts';
+import { Users, CheckCircle, XCircle, TrendingUp, Search, Plus, Trash2, Info } from 'lucide-react';
+
+// Firebase initialization
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'villains-workshop-default';
+
+const WORKSHOP_LIMITS = {
+  500: 20, 450: 19, 400: 18, 350: 17, 325: 16, 300: 15, 
+  275: 14, 250: 13, 230: 12, 210: 11, 190: 10, 170: 9, 
+  150: 8, 101: 7
+};
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [members, setMembers] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [newMember, setNewMember] = useState({ name: '', level: '', workshop: '' });
+  const [loading, setLoading] = useState(true);
+
+  // 1. Strict Authentication Flow (Rule 3)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
     
-    <!-- Chart.js & HTML2PDF -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) setLoading(true);
+    });
     
-    <!-- Icons & Fonts -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    return () => unsubscribe();
+  }, []);
 
-    <style>
-        /* --- CSS VARIABLES & RESET --- */
-        :root {
-            --color-bg: #050505;
-            --color-primary: #ff0033;
-            --color-primary-dark: #cc0000;
-            --color-success: #00ff88;
-            --color-danger: #ff3333;
-            --color-text: #e0e0e0;
-            --color-text-muted: #888888;
-            --glass-bg: rgba(20, 20, 20, 0.7);
-            --glass-border: rgba(255, 255, 255, 0.08);
-            --font-main: 'Inter', sans-serif;
-            --font-display: 'Oswald', sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
-        }
+  // 2. Data Fetching (Guarded by user state)
+  useEffect(() => {
+    if (!user) return;
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+    // Use the mandatory path structure (Rule 1)
+    const membersCollection = collection(db, 'artifacts', appId, 'public', 'data', 'members');
+    
+    const unsubscribe = onSnapshot(
+      membersCollection, 
+      (snapshot) => {
+        const memberList = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setMembers(memberList);
+        setLoading(false);
+      }, 
+      (error) => {
+        console.error("Firestore permission or fetch error:", error);
+        // If we get a permission error, it might be a race condition, we keep loading state
+      }
+    );
 
-        body {
-            font-family: var(--font-main);
-            background-color: var(--color-bg);
-            color: var(--color-text);
-            min-height: 100vh;
-            overflow-x: hidden;
-            position: relative;
-        }
+    return () => unsubscribe();
+  }, [user]);
 
-        /* --- BACKGROUND ANIMATION --- */
-        .bg-animation {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            z-index: -1;
-            background: 
-                radial-gradient(circle at 15% 50%, rgba(255, 0, 51, 0.08), transparent 25%),
-                radial-gradient(circle at 85% 30%, rgba(20, 20, 20, 1), transparent 25%);
-            background-size: 200% 200%;
-            animation: bgMove 15s ease infinite alternate;
-        }
-        
-        .bg-grid {
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background-image: 
-                linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-            background-size: 50px 50px;
-            z-index: -1;
-            mask-image: radial-gradient(circle at 50% 50%, black, transparent 80%);
-        }
+  const getRequirement = (level) => {
+    const sortedLimits = Object.entries(WORKSHOP_LIMITS).sort((a, b) => b[0] - a[0]);
+    for (const [limit, req] of sortedLimits) {
+      if (level >= parseInt(limit)) return req;
+    }
+    return 0;
+  };
 
-        @keyframes bgMove {
-            0% { background-position: 0% 50%; }
-            100% { background-position: 100% 50%; }
-        }
+  const processedMembers = useMemo(() => {
+    return members
+      .filter(m => m.name?.toLowerCase().includes(searchTerm.toLowerCase()))
+      .sort((a, b) => (b.level || 0) - (a.level || 0));
+  }, [members, searchTerm]);
 
-        /* --- LAYOUT UTILITIES --- */
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 40px 20px;
-        }
+  const stats = useMemo(() => {
+    const total = members.length;
+    const completed = members.filter(m => m.workshop >= getRequirement(m.level)).length;
+    const failed = total - completed;
+    const percent = total ? Math.round((completed / total) * 100) : 0;
+    return { total, completed, failed, percent };
+  }, [members]);
 
-        .flex-row { display: flex; align-items: center; gap: 15px; }
-        .flex-col { display: flex; flex-direction: column; gap: 15px; }
-        .justify-between { justify-content: space-between; }
-        .justify-center { justify-content: center; }
-        .grid-stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        .grid-charts {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
+  const handleAddMember = async () => {
+    if (!user || !newMember.name || !newMember.level) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'members'), {
+        name: newMember.name,
+        level: parseInt(newMember.level),
+        workshop: parseInt(newMember.workshop) || 0,
+        createdAt: Date.now(),
+        createdBy: user.uid
+      });
+      setNewMember({ name: '', level: '', workshop: '' });
+      setIsModalOpen(false);
+    } catch (e) {
+      console.error("Add error:", e);
+    }
+  };
 
-        /* --- COMPONENTS: GLASS PANELS --- */
-        .glass-panel {
-            background: var(--glass-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid var(--glass-border);
-            border-radius: 16px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
+  const handleUpdate = async (id, field, value) => {
+    if (!user) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', id);
+    const updateData = {};
+    updateData[field] = (field === 'name') ? value : (parseInt(value) || 0);
+    try {
+      await updateDoc(docRef, updateData);
+    } catch (e) {
+      console.error("Update error:", e);
+    }
+  };
 
-        .glass-panel:hover {
-            border-color: rgba(255, 255, 255, 0.15);
-        }
+  const handleDelete = async (id) => {
+    if (!user) return;
+    if (window.confirm("Opravdu smazat tohoto člena?")) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', id));
+      } catch (e) {
+        console.error("Delete error:", e);
+      }
+    }
+  };
 
-        .card-stat {
-            padding: 25px;
-            position: relative;
-            overflow: hidden;
-            border-top: 3px solid transparent;
-        }
-        
-        .card-stat.red { border-top-color: var(--color-primary); }
-        .card-stat.green { border-top-color: var(--color-success); }
-        .card-stat.blue { border-top-color: #3b82f6; }
+  const chartData = [
+    { name: 'Splněno', value: stats.completed, color: '#10b981' },
+    { name: 'Nesplněno', value: stats.failed, color: '#ef4444' }
+  ];
 
-        .stat-value {
-            font-family: var(--font-display);
-            font-size: 3rem;
-            font-weight: 700;
-            margin-top: 10px;
-            text-shadow: 0 0 20px rgba(0,0,0,0.5);
-        }
-        
-        .stat-label {
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            color: var(--color-text-muted);
-            font-weight: 600;
-        }
-
-        .stat-icon {
-            position: absolute;
-            right: 20px;
-            top: 20px;
-            font-size: 4rem;
-            opacity: 0.05;
-            transform: rotate(-15deg);
-            transition: transform 0.5s;
-        }
-        .card-stat:hover .stat-icon { transform: rotate(0deg) scale(1.1); opacity: 0.1; }
-
-        /* --- TYPOGRAPHY --- */
-        h1.main-title {
-            font-family: var(--font-display);
-            font-size: 4rem;
-            text-align: center;
-            text-transform: uppercase;
-            letter-spacing: 4px;
-            margin-bottom: 0.5rem;
-            background: linear-gradient(to right, #fff, #bbb);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-shadow: 0 0 30px rgba(255, 0, 51, 0.4);
-        }
-
-        .subtitle {
-            text-align: center;
-            color: var(--color-primary);
-            text-transform: uppercase;
-            letter-spacing: 6px;
-            font-size: 0.9rem;
-            margin-bottom: 3rem;
-        }
-
-        .text-glow { text-shadow: 0 0 10px var(--color-primary); }
-        .text-success { color: var(--color-success); }
-        .text-danger { color: var(--color-danger); }
-
-        /* --- BUTTONS & INPUTS --- */
-        .btn {
-            padding: 10px 20px;
-            border-radius: 8px;
-            border: 1px solid transparent;
-            font-family: var(--font-main);
-            font-weight: 600;
-            font-size: 0.9rem;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .btn-main {
-            background: var(--color-primary);
-            color: white;
-            box-shadow: 0 0 15px rgba(255, 0, 51, 0.2);
-        }
-        .btn-main:hover {
-            background: var(--color-primary-dark);
-            box-shadow: 0 0 25px rgba(255, 0, 51, 0.5);
-            transform: translateY(-2px);
-        }
-
-        .btn-secondary {
-            background: rgba(255, 255, 255, 0.05);
-            color: var(--color-text);
-            border-color: rgba(255, 255, 255, 0.1);
-        }
-        .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.1);
-            border-color: white;
-        }
-
-        .btn-icon {
-            width: 30px; height: 30px;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            border-radius: 6px;
-            background: rgba(255, 255, 255, 0.05);
-            color: #aaa;
-            border: none;
-            cursor: pointer;
-            transition: 0.2s;
-        }
-        .btn-icon:hover { background: white; color: black; }
-
-        .input-glow {
-            background: rgba(0, 0, 0, 0.3);
-            border: 1px solid var(--glass-border);
-            color: white;
-            padding: 10px 15px;
-            border-radius: 8px;
-            outline: none;
-            transition: 0.3s;
-            font-family: var(--font-main);
-        }
-        .input-glow:focus {
-            border-color: var(--color-primary);
-            box-shadow: 0 0 15px rgba(255, 0, 51, 0.2);
-        }
-
-        /* --- TABLE STYLES --- */
-        .table-container {
-            overflow-x: auto;
-            border-radius: 16px;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            font-size: 0.95rem;
-        }
-
-        thead th {
-            background: rgba(0, 0, 0, 0.5);
-            padding: 18px;
-            text-align: left;
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.75rem;
-            letter-spacing: 1px;
-            color: #888;
-            border-bottom: 1px solid var(--glass-border);
-        }
-
-        tbody tr {
-            transition: background 0.2s;
-        }
-        tbody tr:hover {
-            background: rgba(255, 255, 255, 0.02);
-        }
-
-        td {
-            padding: 15px 18px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-            vertical-align: middle;
-        }
-
-        .status-badge {
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-        }
-        .status-ok { background: rgba(0, 255, 136, 0.1); color: var(--color-success); border: 1px solid rgba(0, 255, 136, 0.2); }
-        .status-fail { background: rgba(255, 51, 51, 0.1); color: var(--color-danger); border: 1px solid rgba(255, 51, 51, 0.2); }
-
-        .input-table {
-            background: transparent;
-            border: none;
-            border-bottom: 1px solid transparent;
-            color: white;
-            width: 100%;
-            padding: 4px;
-            font-family: inherit;
-            transition: 0.3s;
-        }
-        .input-table:focus {
-            outline: none;
-            border-bottom-color: var(--color-primary);
-            background: rgba(0,0,0,0.2);
-        }
-
-        /* --- LIMITS GRID --- */
-        .limits-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
-        }
-        .limit-box {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid var(--glass-border);
-            border-radius: 10px;
-            padding: 15px;
-            text-align: center;
-            transition: 0.3s;
-        }
-        .limit-box:hover {
-            background: rgba(255,255,255,0.06);
-            transform: translateY(-3px);
-            border-color: var(--color-primary);
-        }
-        .limit-lvl { font-size: 0.75rem; color: #888; text-transform: uppercase; margin-bottom: 5px; }
-        .limit-val { font-size: 1.5rem; font-weight: 700; color: white; font-family: var(--font-display); }
-
-        /* --- MODAL --- */
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.8);
-            backdrop-filter: blur(5px);
-            z-index: 1000;
-            justify-content: center;
-            align-items: center;
-        }
-        .modal.active { display: flex; }
-        .modal-content {
-            background: #151515;
-            border: 1px solid var(--glass-border);
-            width: 90%; max-width: 450px;
-            padding: 30px;
-            border-radius: 16px;
-            position: relative;
-            box-shadow: 0 0 50px rgba(255, 0, 51, 0.2);
-        }
-        .modal-header { margin-bottom: 25px; text-align: center; }
-        .modal-title { font-family: var(--font-display); font-size: 1.8rem; text-transform: uppercase; }
-
-        /* --- SCROLLBAR --- */
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #0a0a0a; }
-        ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--color-primary); }
-
-        /* --- RESPONSIVE --- */
-        @media (max-width: 768px) {
-            h1.main-title { font-size: 2.5rem; }
-            .grid-charts { grid-template-columns: 1fr; }
-            .hide-mobile { display: none; }
-            .toolbar { flex-direction: column; }
-            .toolbar input { width: 100%; }
-            .toolbar-actions { width: 100%; justify-content: space-between; }
-        }
-        
-        #pdfContent { display: none; }
-        
-        /* Toast Notification */
-        .toast {
-            position: fixed; top: 20px; right: 20px;
-            background: #1a1a1a; border-left: 4px solid var(--color-success);
-            padding: 15px 25px; border-radius: 8px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-            transform: translateX(150%); transition: transform 0.3s cubic-bezier(0.68, -0.55, 0.27, 1.55);
-            z-index: 2000; display: flex; align-items: center; gap: 10px;
-        }
-        .toast.show { transform: translateX(0); }
-        .toast.error { border-color: var(--color-danger); }
-    </style>
-</head>
-<body>
-
-    <div class="bg-animation"></div>
-    <div class="bg-grid"></div>
-
-    <!-- Toast -->
-    <div id="toast" class="toast">
-        <i class="fas fa-check-circle" style="color: var(--color-success)"></i>
-        <span id="toastMsg">Akce provedena</span>
+  if (loading) return (
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white p-4">
+      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-red-600 mb-4"></div>
+      <p className="text-gray-500 animate-pulse uppercase tracking-widest text-xs font-bold">Přihlašování do cloudu...</p>
     </div>
+  );
 
-    <div class="container">
-        <!-- Header -->
-        <header>
-            <h1 class="main-title"><span style="color: var(--color-primary)">⚜️</span> Villains <span style="color: var(--color-primary)">⚜️</span></h1>
-            <div class="subtitle">Guild Workshop Tracker</div>
-            
-            <div class="flex-row justify-center" style="margin-bottom: 40px;">
-                <div id="syncIndicator" class="status-badge status-ok" style="background: rgba(255,255,255,0.05); color: #aaa; border-color: #333;">
-                    <i class="fas fa-sync-alt"></i> Synchronizováno
-                </div>
-                <button onclick="showInstructions()" class="btn btn-secondary" style="padding: 5px 15px; font-size: 0.8rem;">
-                    <i class="fas fa-info-circle"></i> Info
-                </button>
-            </div>
+  return (
+    <div className="min-h-screen bg-[#050505] text-gray-200 font-sans p-4 md:p-8">
+      <div className="fixed inset-0 pointer-events-none opacity-20">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-red-900 rounded-full blur-[120px]"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900 rounded-full blur-[120px]"></div>
+      </div>
+
+      <div className="max-w-7xl mx-auto relative z-10">
+        <header className="text-center mb-12">
+          <h1 className="text-5xl md:text-7xl font-black uppercase tracking-tighter text-white mb-2">
+            <span className="text-red-600">⚜</span> Villains <span className="text-red-600">⚜</span>
+          </h1>
+          <p className="text-red-500 font-bold tracking-[0.3em] text-sm uppercase">Cloud Workshop Tracker</p>
+          <div className="mt-4 flex justify-center items-center gap-2">
+             <span className="text-[10px] text-gray-600 font-mono">ID: {user?.uid.substring(0, 8)}...</span>
+            <span className="flex items-center gap-1 text-xs bg-white/5 px-3 py-1 rounded-full border border-white/10 text-gray-400">
+              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Online
+            </span>
+          </div>
         </header>
 
-        <!-- Stats -->
-        <div class="grid-stats">
-            <div class="glass-panel card-stat red">
-                <i class="fas fa-users stat-icon"></i>
-                <div class="stat-label">Celkem Členů</div>
-                <div class="stat-value" style="color: white;" id="totalMembers">0</div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          {[
+            { label: 'Členů', val: stats.total, icon: Users, color: 'text-white' },
+            { label: 'Splněno', val: stats.completed, icon: CheckCircle, color: 'text-emerald-500' },
+            { label: 'Nesplněno', val: stats.failed, icon: XCircle, color: 'text-red-500' },
+            { label: 'Úspěšnost', val: `${stats.percent}%`, icon: TrendingUp, color: 'text-blue-500' }
+          ].map((s, i) => (
+            <div key={i} className="bg-white/5 backdrop-blur-md border border-white/10 p-4 md:p-6 rounded-2xl">
+              <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">{s.label}</p>
+              <p className={`text-2xl md:text-4xl font-black mt-1 ${s.color}`}>{s.val}</p>
             </div>
-            <div class="glass-panel card-stat green">
-                <i class="fas fa-check-circle stat-icon"></i>
-                <div class="stat-label">Splňuje Limit</div>
-                <div class="stat-value text-success" id="completedCount">0</div>
-            </div>
-            <div class="glass-panel card-stat red">
-                <i class="fas fa-times-circle stat-icon"></i>
-                <div class="stat-label">Nesplňuje</div>
-                <div class="stat-value text-danger" id="failedCount">0</div>
-            </div>
-            <div class="glass-panel card-stat blue">
-                <i class="fas fa-chart-pie stat-icon"></i>
-                <div class="stat-label">Úspěšnost</div>
-                <div class="stat-value" style="color: #3b82f6;" id="percentCount">0%</div>
-            </div>
+          ))}
         </div>
 
-        <!-- Charts -->
-        <div class="grid-charts">
-            <div class="glass-panel" style="padding: 20px;">
-                <h3 style="margin-bottom: 20px; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 1px; color: #888;">
-                    <i class="fas fa-chart-doughnut" style="color: var(--color-primary); margin-right: 10px;"></i> Poměr Splnění
-                </h3>
-                <div style="height: 250px; position: relative;">
-                    <canvas id="complianceChart"></canvas>
-                </div>
-            </div>
-            <div class="glass-panel" style="padding: 20px;">
-                <h3 style="margin-bottom: 20px; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 1px; color: #888;">
-                    <i class="fas fa-chart-bar" style="color: var(--color-primary); margin-right: 10px;"></i> Distribuce Dílen
-                </h3>
-                <div style="height: 250px; position: relative;">
-                    <canvas id="workshopChart"></canvas>
-                </div>
-            </div>
+        <div className="grid md:grid-cols-2 gap-6 mb-8">
+          <div className="bg-white/5 border border-white/10 p-6 rounded-2xl h-[300px]">
+            <h3 className="text-xs font-bold text-gray-500 uppercase mb-4 text-center">Poměr splnění limitů</h3>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={chartData} innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                  {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
+                </Pie>
+                <Tooltip contentStyle={{ backgroundColor: '#111', border: 'none', borderRadius: '8px' }} />
+                <Legend verticalAlign="bottom" height={36}/>
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="bg-white/5 border border-white/10 p-6 rounded-2xl h-[300px]">
+            <h3 className="text-xs font-bold text-gray-500 uppercase mb-4 text-center">Levely vs Dílny</h3>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={processedMembers}>
+                <XAxis dataKey="name" hide />
+                <YAxis stroke="#444" fontSize={10} />
+                <Tooltip cursor={{fill: 'rgba(255,255,255,0.05)'}} contentStyle={{ backgroundColor: '#111', border: 'none' }} />
+                <Bar name="Level" dataKey="level" fill="#dc2626" radius={[2, 2, 0, 0]} />
+                <Bar name="Dílna" dataKey="workshop" fill="#10b981" radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
 
-        <!-- Toolbar & Table -->
-        <div class="glass-panel" style="overflow: hidden;">
-            <!-- Toolbar -->
-            <div class="toolbar flex-row justify-between" style="padding: 20px; border-bottom: 1px solid var(--glass-border); background: rgba(0,0,0,0.2);">
-                <div style="position: relative; width: 300px;">
-                    <i class="fas fa-search" style="position: absolute; left: 15px; top: 12px; color: #666;"></i>
-                    <input type="text" id="searchInput" onkeyup="searchMember()" placeholder="Hledat hráče..." class="input-glow" style="width: 100%; padding-left: 40px;">
-                </div>
-
-                <div class="toolbar-actions flex-row">
-                    <button onclick="openAddMemberModal()" class="btn btn-main">
-                        <i class="fas fa-plus"></i> Přidat
-                    </button>
-                    <button onclick="exportToPDF()" class="btn btn-secondary">
-                        <i class="fas fa-file-pdf" style="color: #ff5555;"></i>
-                    </button>
-                    <button onclick="exportCSV()" class="btn btn-secondary">
-                        <i class="fas fa-file-csv" style="color: #55ff55;"></i>
-                    </button>
-                    <button onclick="clearData()" class="btn btn-secondary" title="Reset dat">
-                        <i class="fas fa-trash-alt"></i>
-                    </button>
-                </div>
-            </div>
-
-            <!-- Table -->
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th style="width: 60px; text-align: center;">#</th>
-                            <th>Jméno Hráče</th>
-                            <th style="text-align: center; width: 100px;">Level</th>
-                            <th style="text-align: center; width: 120px;">Dílna</th>
-                            <th style="text-align: center; width: 100px;" class="hide-mobile">Požadavek</th>
-                            <th style="text-align: center; width: 80px;">Rozdíl</th>
-                            <th style="text-align: center; width: 120px;">Stav</th>
-                            <th style="text-align: right; width: 80px;">Akce</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tableBody">
-                        <!-- Rows rendered by JS -->
-                    </tbody>
-                </table>
-            </div>
-            
-            <div id="emptyState" style="padding: 40px; text-align: center; display: none;">
-                <i class="fas fa-ghost" style="font-size: 3rem; color: #333; margin-bottom: 10px;"></i>
-                <p style="color: #666;">Žádní hráči nenalezeni</p>
-            </div>
+        <div className="flex flex-col md:flex-row gap-4 mb-6">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+            <input 
+              type="text" 
+              placeholder="Hledat hráče..."
+              className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-4 focus:ring-1 ring-red-600 outline-none transition-all"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-xl flex items-center justify-center gap-2 transition-all"
+          >
+            <Plus className="w-5 h-5" /> Přidat Člena
+          </button>
         </div>
 
-        <!-- Limits Grid -->
-        <div style="margin-top: 40px;">
-            <h2 style="font-family: var(--font-display); text-transform: uppercase; margin-bottom: 20px; font-size: 1.2rem; color: var(--color-primary);">
-                <i class="fas fa-list-ol"></i> Požadované Úrovně
-            </h2>
-            <div class="limits-grid" id="limitsGrid"></div>
-        </div>
-    </div>
-
-    <!-- Modal -->
-    <div id="addMemberModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2 class="modal-title">Nový Člen</h2>
-                <p style="color: #666; font-size: 0.9rem; margin-top: 5px;">Zadej údaje hráče</p>
-            </div>
-            <div class="flex-col">
-                <div>
-                    <label style="display: block; margin-bottom: 8px; font-size: 0.8rem; color: #aaa; text-transform: uppercase;">Jméno</label>
-                    <input type="text" id="newMemberName" class="input-glow" style="width: 100%;" placeholder="Nick ve hře">
-                </div>
-                <div class="flex-row">
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 8px; font-size: 0.8rem; color: #aaa; text-transform: uppercase;">Level</label>
-                        <input type="number" id="newMemberLevel" class="input-glow" style="width: 100%; text-align: center;" placeholder="1-600">
-                    </div>
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 8px; font-size: 0.8rem; color: #aaa; text-transform: uppercase;">Dílna</label>
-                        <input type="number" id="newMemberWorkshop" class="input-glow" style="width: 100%; text-align: center;" placeholder="0-20">
-                    </div>
-                </div>
-                <div class="flex-row" style="margin-top: 20px;">
-                    <button onclick="closeAddMemberModal()" class="btn btn-secondary" style="flex: 1; justify-content: center;">Zrušit</button>
-                    <button onclick="addNewMember()" class="btn btn-main" style="flex: 1; justify-content: center;">Uložit</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- PDF Template -->
-    <div id="pdfContent">
-        <div style="padding: 40px; background: white; font-family: 'Helvetica', sans-serif; color: #333;">
-            <div style="text-align: center; border-bottom: 2px solid #cc0000; padding-bottom: 20px; margin-bottom: 20px;">
-                <h1 style="color: #cc0000; font-size: 24px; text-transform: uppercase; margin: 0;">⚜️ Villains - Report ⚜️</h1>
-                <p style="font-size: 12px; color: #666; margin-top: 5px;" id="pdfDate"></p>
-            </div>
-            <div style="margin-bottom: 20px; background: #f5f5f5; padding: 15px; border-radius: 5px;">
-                <table style="width: 100%;">
-                    <tr>
-                        <td><strong>Celkem:</strong> <span id="pdfTotalMembers">0</span></td>
-                        <td><strong>OK:</strong> <span style="color: green;" id="pdfCompleted">0</span></td>
-                        <td><strong>Fail:</strong> <span style="color: red;" id="pdfFailed">0</span></td>
-                        <td><strong>%:</strong> <span id="pdfPercent">0%</span></td>
-                    </tr>
-                </table>
-            </div>
-            <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
-                <thead>
-                    <tr style="background: #cc0000; color: white;">
-                        <th style="padding: 8px;">#</th>
-                        <th style="padding: 8px; text-align: left;">Jméno</th>
-                        <th style="padding: 8px;">Lvl</th>
-                        <th style="padding: 8px;">Dílna</th>
-                        <th style="padding: 8px;">Požadavek</th>
-                        <th style="padding: 8px;">Rozdíl</th>
-                        <th style="padding: 8px;">Stav</th>
-                    </tr>
-                </thead>
-                <tbody id="pdfTableBody"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <script>
-        // --- KONFIGURACE ---
-        const workshopLimits = {
-            500: 20, 450: 19, 400: 18, 350: 17, 325: 16, 300: 15, 
-            275: 14, 250: 13, 230: 12, 210: 11, 190: 10, 170: 9, 
-            150: 8, 101: 7
-        };
-
-        const defaultMembers = [
-            { pos: 1, name: 'Werewolf', level: 407, workshop: 0 },
-            { pos: 2, name: 'Aldarion', level: 360, workshop: 0 },
-            { pos: 3, name: 'Zorx', level: 341, workshop: 0 },
-            { pos: 4, name: 'Rohlík', level: 334, workshop: 16 },
-            { pos: 5, name: 'johny', level: 323, workshop: 17 }
-        ];
-
-        let members = [];
-        let chartCompliance = null;
-        let chartDistribution = null;
-
-        // --- CORE FUNCTIONS ---
-        function init() {
-            loadData();
-            if (members.length === 0 && !localStorage.getItem('villains_data_touched')) {
-                members = JSON.parse(JSON.stringify(defaultMembers));
-            }
-            
-            renderLimits();
-            renderTable();
-            initCharts();
-            updateStats();
-            document.getElementById('pdfDate').textContent = new Date().toLocaleDateString('cs-CZ');
-        }
-
-        function loadData() {
-            const saved = localStorage.getItem('villains_workshop_data');
-            if (saved) {
-                try { members = JSON.parse(saved); } catch (e) { console.error(e); }
-            }
-        }
-
-        function saveData() {
-            localStorage.setItem('villains_workshop_data', JSON.stringify(members));
-            localStorage.setItem('villains_data_touched', 'true');
-            
-            const ind = document.getElementById('syncIndicator');
-            ind.innerHTML = '<i class="fas fa-save"></i> Ukládám...';
-            setTimeout(() => {
-                ind.innerHTML = '<i class="fas fa-check"></i> Uloženo';
-                ind.classList.add('status-ok');
-            }, 500);
-        }
-
-        function getRequirement(level) {
-            for (const [limit, req] of Object.entries(workshopLimits).sort((a, b) => b[0] - a[0])) {
-                if (level >= parseInt(limit)) return req;
-            }
-            return 0;
-        }
-
-        // --- RENDER ---
-        function renderLimits() {
-            const grid = document.getElementById('limitsGrid');
-            grid.innerHTML = '';
-            Object.entries(workshopLimits).sort((a, b) => b[0] - a[0]).forEach(([level, req]) => {
-                const box = document.createElement('div');
-                box.className = 'limit-box';
-                box.innerHTML = `<div class="limit-lvl">Lvl ${level}+</div><div class="limit-val">${req}</div>`;
-                grid.appendChild(box);
-            });
-        }
-
-        function renderTable() {
-            const tbody = document.getElementById('tableBody');
-            const pdfBody = document.getElementById('pdfTableBody');
-            const search = document.getElementById('searchInput').value.toLowerCase();
-            
-            tbody.innerHTML = '';
-            pdfBody.innerHTML = '';
-
-            const filtered = members.filter(m => m.name.toLowerCase().includes(search));
-            filtered.sort((a, b) => b.level - a.level);
-
-            document.getElementById('emptyState').style.display = filtered.length === 0 ? 'block' : 'none';
-
-            filtered.forEach((m, idx) => {
-                const req = getRequirement(m.level);
-                const diff = m.workshop - req;
-                const isMet = diff >= 0;
-                const diffColor = isMet ? 'var(--color-success)' : 'var(--color-danger)';
-                const diffSign = diff > 0 ? '+' : '';
-
-                // HTML Row
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td style="text-align: center; color: #666; font-family: var(--font-mono); font-size: 0.8rem;">${idx + 1}</td>
-                    <td><input type="text" class="input-table" value="${m.name}" onchange="updateMember(${m.pos}, 'name', this.value)"></td>
-                    <td style="text-align: center;"><input type="number" class="input-table" style="text-align: center;" value="${m.level}" onchange="updateMember(${m.pos}, 'level', this.value)"></td>
-                    <td style="text-align: center;">
-                        <div class="flex-row justify-center" style="gap: 5px;">
-                            <button class="btn-icon" onclick="adjustWorkshop(${m.pos}, -1)">-</button>
-                            <input type="number" class="input-table" style="width: 40px; text-align: center; font-weight: bold;" value="${m.workshop}" onchange="updateMember(${m.pos}, 'workshop', this.value)">
-                            <button class="btn-icon" onclick="adjustWorkshop(${m.pos}, 1)">+</button>
+        <div className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden mb-12">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[600px]">
+              <thead>
+                <tr className="bg-white/5 text-[10px] uppercase tracking-widest text-gray-500">
+                  <th className="px-6 py-4 font-bold">Nick</th>
+                  <th className="px-6 py-4 font-bold text-center">Level</th>
+                  <th className="px-6 py-4 font-bold text-center">Dílna</th>
+                  <th className="px-6 py-4 font-bold text-center">Potřeba</th>
+                  <th className="px-6 py-4 font-bold text-center">Stav</th>
+                  <th className="px-6 py-4 font-bold text-right">Akce</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {processedMembers.map((m) => {
+                  const req = getRequirement(m.level);
+                  const isMet = m.workshop >= req;
+                  return (
+                    <tr key={m.id} className="hover:bg-white/[0.02] transition-colors group">
+                      <td className="px-6 py-4">
+                        <input 
+                          className="bg-transparent border-none focus:ring-0 w-full font-bold text-white p-0"
+                          value={m.name}
+                          onChange={(e) => handleUpdate(m.id, 'name', e.target.value)}
+                        />
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <input 
+                          type="number"
+                          className="bg-transparent border-none focus:ring-0 w-16 text-center font-mono p-0"
+                          value={m.level}
+                          onChange={(e) => handleUpdate(m.id, 'level', e.target.value)}
+                        />
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <div className="inline-flex items-center gap-3">
+                           <button onClick={() => handleUpdate(m.id, 'workshop', m.workshop - 1)} className="text-gray-500 hover:text-white transition-colors w-6 h-6 flex items-center justify-center bg-white/5 rounded">-</button>
+                           <input 
+                            type="number"
+                            className="bg-white/5 border border-white/10 rounded-lg w-12 text-center py-1 font-bold text-sm"
+                            value={m.workshop}
+                            onChange={(e) => handleUpdate(m.id, 'workshop', e.target.value)}
+                          />
+                          <button onClick={() => handleUpdate(m.id, 'workshop', m.workshop + 1)} className="text-gray-500 hover:text-white transition-colors w-6 h-6 flex items-center justify-center bg-white/5 rounded">+</button>
                         </div>
-                    </td>
-                    <td class="hide-mobile" style="text-align: center; color: #888; font-size: 0.85rem;">min. ${req}</td>
-                    <td style="text-align: center; font-weight: bold; color: ${diffColor}; font-family: var(--font-mono);">${diffSign}${diff}</td>
-                    <td style="text-align: center;">
-                        <span class="status-badge ${isMet ? 'status-ok' : 'status-fail'}">
-                            ${isMet ? '<i class="fas fa-check"></i> OK' : '<i class="fas fa-times"></i> FAIL'}
+                      </td>
+                      <td className="px-6 py-4 text-center text-gray-500 text-xs">
+                        min. {req}
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${isMet ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' : 'bg-red-500/10 text-red-500 border border-red-500/20'}`}>
+                          {isMet ? 'OK' : 'Fail'}
                         </span>
-                    </td>
-                    <td style="text-align: right;">
-                        <button class="btn-icon" style="color: #666;" onclick="deleteMember(${m.pos})"><i class="fas fa-trash"></i></button>
-                    </td>
-                `;
-                tbody.appendChild(tr);
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <button onClick={() => handleDelete(m.id)} className="text-gray-600 hover:text-red-500 transition-colors p-2">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {processedMembers.length === 0 && (
+            <div className="py-20 text-center text-gray-600 uppercase tracking-widest text-[10px] font-bold">
+              Žádní členové v databázi
+            </div>
+          )}
+        </div>
 
-                // PDF Row
-                const pdfTr = document.createElement('tr');
-                pdfTr.innerHTML = `
-                    <td style="padding: 6px; text-align: center; border-bottom: 1px solid #ddd;">${idx + 1}</td>
-                    <td style="padding: 6px; border-bottom: 1px solid #ddd;">${m.name}</td>
-                    <td style="padding: 6px; text-align: center; border-bottom: 1px solid #ddd;">${m.level}</td>
-                    <td style="padding: 6px; text-align: center; border-bottom: 1px solid #ddd;">${m.workshop}</td>
-                    <td style="padding: 6px; text-align: center; border-bottom: 1px solid #ddd; color: #666;">${req}</td>
-                    <td style="padding: 6px; text-align: center; border-bottom: 1px solid #ddd; color: ${isMet ? 'green' : 'red'}; font-weight: bold;">${diffSign}${diff}</td>
-                    <td style="padding: 6px; text-align: center; border-bottom: 1px solid #ddd;">${isMet ? 'OK' : 'FAIL'}</td>
-                `;
-                pdfBody.appendChild(pdfTr);
-            });
-        }
+        <div className="mb-20">
+          <h2 className="text-xl font-black uppercase text-red-600 mb-6 flex items-center gap-2">
+            <Info className="w-5 h-5" /> Aktuální Limity Dílen
+          </h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-3">
+            {Object.entries(WORKSHOP_LIMITS).sort((a,b) => b[0]-a[0]).map(([lvl, ws]) => (
+              <div key={lvl} className="bg-white/5 border border-white/10 p-3 rounded-xl text-center">
+                <p className="text-[10px] text-gray-500 uppercase font-bold">Lvl {lvl}+</p>
+                <p className="text-xl font-black text-white">{ws}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
 
-        function updateMember(pos, field, val) {
-            const m = members.find(x => x.pos === pos);
-            if (m) {
-                m[field] = (field === 'name') ? val : parseInt(val) || 0;
-                saveData();
-                renderTable(); // Re-render to sort
-                updateStats();
-            }
-        }
-
-        function adjustWorkshop(pos, delta) {
-            const m = members.find(x => x.pos === pos);
-            if (m) {
-                m.workshop = Math.max(0, Math.min(20, m.workshop + delta));
-                saveData();
-                renderTable();
-                updateStats();
-            }
-        }
-
-        function deleteMember(pos) {
-            if (confirm('Smazat hráče?')) {
-                members = members.filter(x => x.pos !== pos);
-                saveData();
-                renderTable();
-                updateStats();
-                showToast('Hráč smazán', 'error');
-            }
-        }
-
-        function addNewMember() {
-            const name = document.getElementById('newMemberName').value.trim();
-            const lvl = parseInt(document.getElementById('newMemberLevel').value);
-            const ws = parseInt(document.getElementById('newMemberWorkshop').value) || 0;
-
-            if (name && lvl) {
-                members.push({ pos: Date.now(), name, level: lvl, workshop: ws });
-                saveData();
-                renderTable();
-                updateStats();
-                closeAddMemberModal();
-                showToast('Hráč přidán', 'success');
-            } else {
-                alert('Vyplň jméno a level!');
-            }
-        }
-
-        // --- STATS & CHARTS ---
-        function updateStats() {
-            const total = members.length;
-            const completed = members.filter(m => m.workshop >= getRequirement(m.level)).length;
-            const failed = total - completed;
-            const percent = total ? Math.round((completed/total)*100) : 0;
-
-            animateNum('totalMembers', total);
-            animateNum('completedCount', completed);
-            animateNum('failedCount', failed);
-            document.getElementById('percentCount').innerText = percent + "%";
-
-            // PDF Stats
-            document.getElementById('pdfTotalMembers').innerText = total;
-            document.getElementById('pdfCompleted').innerText = completed;
-            document.getElementById('pdfFailed').innerText = failed;
-            document.getElementById('pdfPercent').innerText = percent + "%";
-
-            updateCharts(completed, failed);
-        }
-
-        function animateNum(id, end) {
-            const obj = document.getElementById(id);
-            const start = parseInt(obj.innerText);
-            if (start === end) return;
-            obj.innerText = end; // Simple update for responsiveness
-        }
-
-        function initCharts() {
-            // Doughnut
-            chartCompliance = new Chart(document.getElementById('complianceChart'), {
-                type: 'doughnut',
-                data: {
-                    labels: ['Splněno', 'Nesplněno'],
-                    datasets: [{ data: [0,0], backgroundColor: ['#00ff88', '#ff3333'], borderWidth: 0 }]
-                },
-                options: { 
-                    responsive: true, 
-                    maintainAspectRatio: false,
-                    plugins: { legend: { position: 'bottom', labels: { color: '#aaa', font: { family: 'Inter' } } } },
-                    cutout: '75%'
-                }
-            });
-
-            // Bar
-            chartDistribution = new Chart(document.getElementById('workshopChart'), {
-                type: 'bar',
-                data: {
-                    labels: [],
-                    datasets: [{ label: 'Hráči', data: [], backgroundColor: '#ff0033', borderRadius: 4 }]
-                },
-                options: {
-                    responsive: true, 
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#666' } },
-                        x: { grid: { display: false }, ticks: { color: '#666' } }
-                    },
-                    plugins: { legend: { display: false } }
-                }
-            });
-        }
-
-        function updateCharts(comp, fail) {
-            if (chartCompliance) {
-                chartCompliance.data.datasets[0].data = [comp, fail];
-                chartCompliance.update();
-            }
-            if (chartDistribution) {
-                const dist = {};
-                members.forEach(m => dist[m.workshop] = (dist[m.workshop] || 0) + 1);
-                const labels = Object.keys(dist).sort((a,b)=>a-b);
-                chartDistribution.data.labels = labels.map(l => 'Lvl ' + l);
-                chartDistribution.data.datasets[0].data = labels.map(l => dist[l]);
-                chartDistribution.update();
-            }
-        }
-
-        // --- UI UTILS ---
-        function showToast(msg, type) {
-            const t = document.getElementById('toast');
-            document.getElementById('toastMsg').innerText = msg;
-            t.className = `toast show ${type === 'error' ? 'error' : ''}`;
-            t.querySelector('i').className = type === 'error' ? 'fas fa-exclamation-circle' : 'fas fa-check-circle';
-            t.querySelector('i').style.color = type === 'error' ? 'var(--color-danger)' : 'var(--color-success)';
-            setTimeout(() => t.classList.remove('show'), 3000);
-        }
-
-        function openAddMemberModal() { 
-            document.getElementById('addMemberModal').classList.add('active'); 
-            document.getElementById('newMemberName').value = '';
-            document.getElementById('newMemberLevel').value = '';
-            document.getElementById('newMemberWorkshop').value = '';
-        }
-        function closeAddMemberModal() { document.getElementById('addMemberModal').classList.remove('active'); }
-        function searchMember() { renderTable(); }
-        function clearData() { if(confirm('Opravdu smazat vše?')) { members = []; saveData(); renderTable(); updateStats(); } }
-        function showInstructions() { alert('Villains Workshop Tracker\n\n1. Tabulka automaticky počítá rozdíl mezi dílnou a levelem.\n2. Vše se automaticky ukládá.\n3. Data jsou uložena jen v tomto prohlížeči.'); }
-
-        function exportToPDF() {
-            const el = document.getElementById('pdfContent');
-            el.style.display = 'block';
-            html2pdf().from(el).set({ margin: 10, filename: 'Villains_Report.pdf', jsPDF: { unit: 'mm', format: 'a4' } }).save().then(() => el.style.display = 'none');
-        }
-
-        function exportCSV() {
-            let csv = 'Pořadí,Jméno,Level,Dílna,Stav\n';
-            members.forEach((m,i) => csv += `${i+1},${m.name},${m.level},${m.workshop},${m.workshop >= getRequirement(m.level) ? 'OK' : 'FAIL'}\n`);
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
-            link.download = 'export.csv';
-            link.click();
-        }
-
-        // START
-        window.addEventListener('DOMContentLoaded', init);
-        window.onclick = function(e) { if(e.target == document.getElementById('addMemberModal')) closeAddMemberModal(); }
-    </script>
-</body>
-</html>
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="bg-[#111] border border-white/10 w-full max-w-md rounded-2xl p-8 shadow-2xl">
+            <h2 className="text-2xl font-black text-white uppercase mb-6">Nový Hráč</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Jméno / Nick</label>
+                <input 
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:ring-1 ring-red-600"
+                  placeholder="Nick ve hře"
+                  value={newMember.name}
+                  onChange={(e) => setNewMember({...newMember, name: e.target.value})}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Level</label>
+                  <input 
+                    type="number"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:ring-1 ring-red-600"
+                    placeholder="1-600"
+                    value={newMember.level}
+                    onChange={(e) => setNewMember({...newMember, level: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Dílna</label>
+                  <input 
+                    type="number"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:ring-1 ring-red-600"
+                    placeholder="0-20"
+                    value={newMember.workshop}
+                    onChange={(e) => setNewMember({...newMember, workshop: e.target.value})}
+                  />
+                </div>
+              </div>
+              <div className="flex gap-3 mt-8">
+                <button 
+                  onClick={() => setIsModalOpen(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-3 rounded-xl transition-all"
+                >
+                  Zrušit
+                </button>
+                <button 
+                  onClick={handleAddMember}
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all"
+                >
+                  Uložit
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
